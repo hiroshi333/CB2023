@@ -1,0 +1,216 @@
+#   metabolic_machine.py - 
+#   Copyright (C) 2018 Keith Murphy
+#
+#   This program is free software: you can redistribute it and/or modify
+#   it under the terms of the GNU General Public License as published by
+#   the Free Software Foundation, either version 3 of the License, or
+#   any later version.
+#
+#   This program is distributed in the hope that it will be useful,
+#   but WITHOUT ANY WARRANTY; without even the implied warranty of
+#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#   GNU General Public License for more details.
+#
+#   You should have received a copy of the GNU General Public License
+#   along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+######## imports #########
+import os
+import serial                   # pip install pyserial
+import pyfirmata                # pip install pyfirmata
+import matplotlib.pyplot as plt # pip install matplotlib
+import time
+import sys
+import numpy as np  # pip install numpy
+from pyfirmata import Arduino, util
+import threading
+from os.path import join
+import csv
+from datetime import datetime
+from pytz import timezone
+import pytz
+
+def main():
+    
+    print("Connecting to hardware...")
+    try:
+        print("Establishing board connection...")
+        comPort = 'COM4'
+        print("Connecting to "+comPort)
+        board = Arduino(comPort)
+        print("Connection established.")
+    except:
+        print("Connection Failed: Check com serial label in script.")
+
+    directory         = os.getcwd()
+    outputDataName    = input("Name your output file: ")
+    outputDataFile    = directory + "/" + outputDataName + ".txt"
+    data_file = open(outputDataFile, 'a')
+    plt.style.use('dark_background')
+    date_format ='%m/%d/%Y %H:%M:%S'
+    
+    CO2        = []
+    CO2_temp   = []
+    plot_len   = 100
+    analog_pin = 0
+    air_pin    = 12
+    pin_dur    = 60
+    dat_int    = 300
+    voltage    = 0
+    read_count = 0
+    read_int   = 5
+    update_sec = False
+    pin_list = [0,1,2,4]
+    
+    iterator = util.Iterator(board)
+    iterator.start()
+
+    co2_sensor1 = board.get_pin('a:0:i')
+    co2_sensor2 = board.get_pin('a:1:i')
+    co2_sensor3 = board.get_pin('a:2:i')
+    co2_sensor4 = board.get_pin('a:4:i')
+    
+    while True:   # will run program until esc is pressed
+        
+        sec = getSec()
+        sensor_vals = []
+        sensor_vals.append(co2_sensor1.read())
+        sensor_vals.append(co2_sensor2.read())
+        sensor_vals.append(co2_sensor3.read())
+        sensor_vals.append(co2_sensor4.read())
+
+        if sensor_vals[0] != None and sensor_vals[1] != None and sensor_vals[2] != None and sensor_vals[3] != None:
+
+            volts = [float(i*(5000/1024)) for i in sensor_vals]
+            #voltage = float(sensorValue*(5000/1024.0))
+            #voltage_diference = voltage - 400
+            #voltage = voltage_diference*50.0/16.0
+            CO2_temp.append(volts)
+            CO2.append(volts)
+            makeFig(CO2)                    #Call drawnow to update our live graph
+            plt.pause(.01)                #Pause Briefly. Important to keep drawnow from crashing
+            plt.gcf().clear()
+            read_count = read_count+1
+            if(read_count > plot_len):      #If you have plot_len or more points, delete the first one from the array
+                CO2.pop(0)                   #This allows us to just see the last plot_len data points
+                
+        if sec != update_sec and sec % dat_int == 0:
+            
+            date = datetime.now(tz=pytz.utc)
+            date = date.astimezone(timezone('US/Pacific'))
+            date.strftime(date_format)
+            vector_out = [date, sec, CO2_temp[-1][0],CO2_temp[-1][1],CO2_temp[-1][2],CO2_temp[-1][3]]
+            dataToFile = toFileThread(data_file,vector_out)
+            dataToFile.start()
+            sol_control = pinThread(board,air_pin,pin_dur)
+            sol_control.start()
+            CO2_temp = []
+            update_sec = sec
+
+    
+class toFileThread(threading.Thread):
+    def __init__(self, file, vector):
+        threading.Thread.__init__(self)
+        self.vector = vector
+        self.file = file
+
+    def run(self):
+        newString = listToTabStrings(self.vector)
+        self.file.writelines(newString) 
+        self.file.flush()
+        os.fsync(self.file.fileno())
+        
+    def getLength(self):
+        return self.listLength
+
+    def getNumTracks(self):
+        return self.numTracks
+
+    def addVector(self,vector):
+        self.vectorSet.pop(0)
+        self.vectorSet.append(vector)
+
+    def getMoveList(self):
+        return self.vectorSet
+
+class pinThread (threading.Thread):
+    def __init__(self, board, pin, pin_dur):
+        threading.Thread.__init__(self)
+        self.pin = pin
+        self.board = board
+        self.pin_dur = pin_dur
+
+    def run(self):
+        #print("pin_" + str(self.pin)+" is now on")
+        pinOn(self.board,self.pin)
+        time.sleep(self.pin_dur)
+        pinOff(self.board,self.pin)
+        #print("pin_" + str(self.pin)+ " is now off")
+
+### pin operation list
+def pinOn(board,pin):
+    board.digital[pin].write(1)
+
+def pinOff(board,pin):
+    board.digital[pin].write(0)
+
+def listToDelta(tempList):
+    delta = []
+    for i in range(1,len(tempList)):
+        delta.append(tempList[i]-tempList[i-1])
+    return delta
+
+def listToTabStrings(vector):
+    newString = ""
+    for i in range(len(vector)):
+        newString = newString + str(vector[i])+'\t'
+    newString = newString +'\n'    
+    return newString
+
+def makeFig(CO2): #Create a function that makes our desired plot
+
+    plt.ylim(0.4,2)                                 #Set y min and max values
+    plt.title(' CO2 Live Streaming Sensor Data')      #Plot the title
+    plt.grid(True)                                  #Turn the grid on
+    plt.ylabel('CO2 (ppm)')                            #Set ylabels
+    plt.xlabel('Read #')
+    #plt.gca().set_color_cycle(['red', 'green', 'blue', 'yellow'])
+    t_CO2 = transpose(CO2)
+    plt.plot(t_CO2[0], label='Degrees F',linestyle='-',color='yellow',linewidth=2)
+    plt.plot(t_CO2[1], label='Degrees F',linestyle='-',color='green',linewidth=2)
+    plt.plot(t_CO2[2], label='Degrees F',linestyle='-',color='red',linewidth=2)
+    plt.plot(t_CO2[3], label='Degrees F',linestyle='-',color='blue',linewidth=2)
+            
+def transpose(matrix):
+    # Flips matrix rows into columns and vice versa. Matrix should contain lists of = length,
+    # otherwise short lists will be extended with ""
+    listLength = []
+    for i in range(len(matrix)):
+        listLength.append(len(matrix[i]))
+    long = max(listLength)
+    for i in range(len(matrix)):
+        while len(matrix[i]) < long:
+            matrix[i].append("")
+    longList = []
+    for i in range(len(matrix[0])):
+        shortList = []
+        for n in range(len(matrix)):
+            shortList.append(matrix[n][i])
+        longList.append(shortList)
+    return longList
+
+def avg (group):
+    # returns average of a list after filtering all non ints / floats
+    try:
+        group = [i for i in group if type(i) != str]
+        average = (sum(group)) / len(group)
+    except:
+        average = None
+    return(average)
+
+def getSec():
+    t = time.gmtime()
+    sec = t.tm_sec + (t.tm_min * 60) + (t.tm_hour * 3600)
+    return  sec
+
+main()
